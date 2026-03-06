@@ -1,0 +1,16 @@
+from pydantic import BaseModel, Field
+from typing import Literal
+
+
+class ResearchRequest(BaseModel):
+    topic: str = Field(..., min_length=3, description="Topic to research")
+    depth: Literal["brief", "detailed"] = "detailed"
+
+
+class ResearchReport(BaseModel):
+    topic: str
+    summary: str
+    key_findings: list[str]
+    full_report: str
+    sources_consulted: list[str]
+    word_count: int
