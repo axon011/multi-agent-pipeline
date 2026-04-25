@@ -1,9 +1,8 @@
-import os
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from app.graph.pipeline import PipelineState
+from app.config import get_llm
+from app.models.schemas import PipelineState
 
-llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o"), temperature=0.4)
+llm = get_llm(temperature=0.4)
 
 RESEARCH_PROMPT = ChatPromptTemplate.from_messages([
     ("system", "You are a thorough researcher. Answer each research question with factual, detailed information."),
