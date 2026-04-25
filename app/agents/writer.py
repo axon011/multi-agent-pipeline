@@ -1,8 +1,5 @@
 from langchain_core.prompts import ChatPromptTemplate
-from app.config import get_llm
 from app.models.schemas import PipelineState
-
-llm = get_llm(temperature=0.5)
 
 WRITE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", "You are a professional technical writer. Synthesize research notes into a well-structured, readable report with an executive summary, key findings (as bullet points), and a conclusion."),
@@ -11,6 +8,8 @@ WRITE_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def run_writer(state: PipelineState) -> PipelineState:
+    from app.config import get_llm
+    llm = get_llm(temperature=0.5)
     notes_text = "\n".join(state["research_notes"])
     chain = WRITE_PROMPT | llm
     response = chain.invoke({"topic": state["topic"], "notes": notes_text})
