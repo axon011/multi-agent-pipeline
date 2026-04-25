@@ -20,4 +20,4 @@ def get_llm(temperature: float = 0.3) -> ChatOpenAI:
 
 def get_claude_llm():
     from langchain_claude_code import ChatClaudeCode
-    return ChatClaudeCode()
+    return ChatClaudeCode(model="sonnet", permission_mode="default")
