@@ -1,5 +1,13 @@
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, TypedDict
+
+
+class PipelineState(TypedDict):
+    topic: str
+    depth: str
+    plan: list[str]
+    research_notes: list[str]
+    report: str
 
 
 class ResearchRequest(BaseModel):

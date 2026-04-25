@@ -1,9 +1,8 @@
-import os
-from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from app.graph.pipeline import PipelineState
+from app.config import get_claude_llm
+from app.models.schemas import PipelineState
 
-llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o"), temperature=0.3)
+llm = get_claude_llm()
 
 PLAN_PROMPT = ChatPromptTemplate.from_messages([
     ("system", "You are a research planner. Given a topic, produce a numbered list of 3-5 specific research questions to answer. Be concise."),

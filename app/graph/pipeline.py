@@ -1,17 +1,8 @@
-from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
 from app.agents.planner import run_planner
 from app.agents.researcher import run_researcher
 from app.agents.writer import run_writer
-from app.models.schemas import ResearchReport
-
-
-class PipelineState(TypedDict):
-    topic: str
-    depth: str
-    plan: list[str]
-    research_notes: list[str]
-    report: str
+from app.models.schemas import ResearchReport, PipelineState
 
 
 def build_graph():
