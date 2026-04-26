@@ -2,12 +2,19 @@ from pydantic import BaseModel, Field
 from typing import Literal, TypedDict
 
 
-class PipelineState(TypedDict):
+class PipelineState(TypedDict, total=False):
     topic: str
     depth: str
     plan: list[str]
     research_notes: list[str]
+    sources: list[dict]  # list of {"title", "url", "snippet"}
     report: str
+
+
+class Source(BaseModel):
+    title: str
+    url: str
+    snippet: str = ""
 
 
 class ResearchRequest(BaseModel):
@@ -20,5 +27,5 @@ class ResearchReport(BaseModel):
     summary: str
     key_findings: list[str]
     full_report: str
-    sources_consulted: list[str]
+    sources: list[Source] = Field(default_factory=list)
     word_count: int

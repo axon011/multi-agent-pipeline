@@ -1,15 +1,18 @@
+import re
+
 from langgraph.graph import StateGraph, END
+
 from app.agents.planner import run_planner
-from app.agents.researcher import run_researcher
+from app.agents.researcher import arun_researcher
 from app.agents.writer import run_writer
-from app.models.schemas import ResearchReport, PipelineState
+from app.models.schemas import PipelineState, ResearchReport, Source
 
 
 def build_graph():
     graph = StateGraph(PipelineState)
 
     graph.add_node("planner", run_planner)
-    graph.add_node("researcher", run_researcher)
+    graph.add_node("researcher", arun_researcher)  # async node
     graph.add_node("writer", run_writer)
 
     graph.set_entry_point("planner")
@@ -23,25 +26,80 @@ def build_graph():
 COMPILED_GRAPH = build_graph()
 
 
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+\.)\s+(.+)$")
+
+
+def _extract_key_findings(report: str, max_findings: int = 5) -> list[str]:
+    """Pull bullet points out of a markdown report."""
+    findings: list[str] = []
+    in_findings_section = False
+
+    for line in report.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Detect a "Key Findings" header so we prefer those bullets
+        if re.match(r"^#{1,4}\s*key findings", stripped, re.IGNORECASE):
+            in_findings_section = True
+            continue
+        if stripped.startswith("#"):
+            in_findings_section = False
+
+        match = _BULLET_RE.match(line)
+        if match:
+            text = match.group(1).strip().strip("*_`")
+            if len(text) > 20:  # skip tiny bullets like single words
+                findings.append(text)
+                if in_findings_section and len(findings) >= max_findings:
+                    break
+
+    return findings[:max_findings]
+
+
+def _build_summary(report: str, max_chars: int = 400) -> str:
+    """Take the first meaningful paragraph as the summary."""
+    paragraphs = [p.strip() for p in report.split("\n\n") if p.strip()]
+    for p in paragraphs:
+        clean = p.lstrip("#").strip()
+        if len(clean) >= 60 and not clean.startswith(("**Executive", "Author")):
+            return clean[:max_chars] + ("…" if len(clean) > max_chars else "")
+    return report[:max_chars]
+
+
+def state_to_report(topic: str, final_state: PipelineState) -> ResearchReport:
+    report_text = final_state.get("report", "")
+    findings = _extract_key_findings(report_text)
+    sources_raw = final_state.get("sources", []) or []
+
+    sources = [
+        Source(
+            title=s.get("title", ""),
+            url=s.get("url", ""),
+            snippet=s.get("snippet", ""),
+        )
+        for s in sources_raw
+    ]
+
+    return ResearchReport(
+        topic=topic,
+        summary=_build_summary(report_text),
+        key_findings=findings or ["See full report"],
+        full_report=report_text,
+        sources=sources,
+        word_count=len(report_text.split()),
+    )
+
+
 async def run_pipeline(topic: str, depth: str) -> ResearchReport:
     initial_state: PipelineState = {
         "topic": topic,
         "depth": depth,
         "plan": [],
         "research_notes": [],
+        "sources": [],
         "report": "",
     }
 
     final_state = await COMPILED_GRAPH.ainvoke(initial_state)
-
-    report_text = final_state["report"]
-    findings = [line.strip("- ") for line in report_text.split("\n") if line.startswith("-")][:5]
-
-    return ResearchReport(
-        topic=topic,
-        summary=report_text[:300],
-        key_findings=findings or ["See full report"],
-        full_report=report_text,
-        sources_consulted=final_state.get("research_notes", []),
-        word_count=len(report_text.split()),
-    )
+    return state_to_report(topic, final_state)
