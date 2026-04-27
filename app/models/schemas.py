@@ -8,6 +8,7 @@ class PipelineState(TypedDict, total=False):
     plan: list[str]
     research_notes: list[str]
     sources: list[dict]  # list of {"title", "url", "snippet"}
+    routing: list[dict]  # per-question routing decisions
     report: str
 
 

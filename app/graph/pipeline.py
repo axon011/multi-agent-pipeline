@@ -98,6 +98,7 @@ async def run_pipeline(topic: str, depth: str) -> ResearchReport:
         "plan": [],
         "research_notes": [],
         "sources": [],
+        "routing": [],
         "report": "",
     }
 

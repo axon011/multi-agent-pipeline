@@ -5,28 +5,31 @@ import re
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.models.schemas import PipelineState
+from app.tools.router import explain_routing, route_sources
 from app.tools.search import (
     SearchResult,
     format_results_for_prompt,
-    web_search_async,
 )
+from app.tools.sources import search_many
 
 logger = logging.getLogger(__name__)
 
 RESEARCH_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
-        "You are a thorough researcher. Synthesize the provided web search "
-        "results into a factual, well-cited answer to the question. "
+        "You are a thorough researcher. Synthesize the provided multi-source "
+        "search results into a factual, well-cited answer to the question. "
         "When citing facts, reference sources as [1], [2], etc., matching "
         "the numbered results provided. Stay grounded — do not invent facts "
-        "that aren't supported by the sources."
+        "that aren't supported by the sources. Mention the source type "
+        "(paper, repo, encyclopedia, discussion) when it adds context."
     ),
     (
         "user",
         "Question: {question}\n\n"
-        "Web search results:\n{search_context}\n\n"
-        "Write a focused 3-5 sentence answer with inline citations like [1], [2]."
+        "Sources used: {sources_used}\n\n"
+        "Search results:\n{search_context}\n\n"
+        "Write a focused 3-5 sentence answer with inline [1], [2] citations."
     ),
 ])
 
@@ -35,20 +38,46 @@ def _strip_numbering(line: str) -> str:
     return re.sub(r"^\s*[\d]+[\.\)]\s*", "", line).strip()
 
 
-async def _research_one_question(question: str, llm) -> tuple[str, list[SearchResult]]:
-    """Search the web for a question, then ask the LLM to synthesize an answer."""
+def _flatten_results(grouped: dict[str, list[SearchResult]]) -> list[SearchResult]:
+    """Flatten {source: [results]} into a single ordered list, deduped by URL."""
+    flat: list[SearchResult] = []
+    seen: set[str] = set()
+    for source, items in grouped.items():
+        for item in items:
+            if item.url and item.url not in seen:
+                seen.add(item.url)
+                flat.append(item)
+    return flat
+
+
+async def _research_one_question(
+    question: str,
+    llm,
+    topic: str | None = None,
+) -> tuple[str, list[SearchResult], list[str]]:
+    """Route → multi-source search → LLM synthesis. Returns (note, sources, source_names)."""
     cleaned = _strip_numbering(question)
-    results = await web_search_async(cleaned, max_results=4)
-    search_context = format_results_for_prompt(results)
+    chosen_sources = route_sources(cleaned, topic=topic)
+
+    grouped = await search_many(cleaned, chosen_sources, max_per_source=3)
+    flat = _flatten_results(grouped)
+
+    if not flat:
+        # Fallback: try DDG directly
+        from app.tools.search import web_search_async
+        flat = await web_search_async(cleaned, max_results=4)
+
+    search_context = format_results_for_prompt(flat[:8])
 
     chain = RESEARCH_PROMPT | llm
     response = await chain.ainvoke({
         "question": cleaned,
+        "sources_used": ", ".join(chosen_sources),
         "search_context": search_context,
     })
 
-    note = f"**{cleaned}**\n{response.content}"
-    return note, results
+    note = f"**{cleaned}**\n_Sources: {explain_routing(cleaned, chosen_sources)}_\n{response.content}"
+    return note, flat, chosen_sources
 
 
 async def _run_researcher_async(state: PipelineState) -> PipelineState:
@@ -60,21 +89,29 @@ async def _run_researcher_async(state: PipelineState) -> PipelineState:
     if not questions:
         state["research_notes"] = []
         state["sources"] = []
+        state["routing"] = []
         return state
 
-    tasks = [_research_one_question(q, llm) for q in questions]
+    topic = state.get("topic")
+    tasks = [_research_one_question(q, llm, topic=topic) for q in questions]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     notes: list[str] = []
     all_sources: list[dict] = []
     seen_urls: set[str] = set()
+    routing_log: list[dict] = []
 
-    for item in results:
+    for q, item in zip(questions, results):
         if isinstance(item, Exception):
             logger.warning("research subtask failed: %s", item)
             continue
-        note, sources = item
+        note, sources, source_names = item
         notes.append(note)
+        routing_log.append({
+            "question": _strip_numbering(q),
+            "sources": source_names,
+            "found": len(sources),
+        })
         for s in sources:
             if s.url and s.url not in seen_urls:
                 seen_urls.add(s.url)
@@ -82,20 +119,18 @@ async def _run_researcher_async(state: PipelineState) -> PipelineState:
 
     state["research_notes"] = notes
     state["sources"] = all_sources
+    state["routing"] = routing_log
     return state
 
 
 def run_researcher(state: PipelineState) -> PipelineState:
-    """LangGraph node — runs async pipeline in a fresh event loop if needed."""
+    """Sync wrapper — only used if graph runs synchronously."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
 
     if loop and loop.is_running():
-        # Already inside an event loop (FastAPI / LangGraph async path)
-        # Schedule and wait. LangGraph will normally call the async version
-        # via `astream`/`ainvoke`, so this branch is a fallback.
         future = asyncio.ensure_future(_run_researcher_async(state))
         return loop.run_until_complete(future)
     return asyncio.run(_run_researcher_async(state))

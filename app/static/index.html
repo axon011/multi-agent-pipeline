@@ -238,6 +238,42 @@
             font-family: 'JetBrains Mono', monospace;
         }
 
+        .routing-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            padding: 0.55rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.85rem;
+        }
+        .routing-row:last-child { border-bottom: none; }
+        .routing-q {
+            flex: 1;
+            color: var(--text);
+            min-width: 0;
+        }
+        .routing-pills {
+            display: flex;
+            gap: 0.3rem;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .source-pill {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .source-pill.arxiv { color: #b91c1c; border-color: #b91c1c; }
+        .source-pill.wikipedia { color: #888892; border-color: #555560; }
+        .source-pill.github { color: #5cb8ff; border-color: #5cb8ff; }
+        .source-pill.hackernews { color: #ff6b35; border-color: #ff6b35; }
+        .source-pill.duckduckgo { color: #fbbf24; border-color: #fbbf24; }
+
         .questions { list-style: none; }
         .questions li {
             padding: 0.5rem 0;
@@ -388,11 +424,11 @@
             <div class="arch-line">
                 <span>Claude (Sonnet)</span> plans
                 <span>→</span>
-                <span>GLM-5-turbo</span> searches & researches
+                <span>multi-source router</span>
                 <span>→</span>
-                <span>GLM-5-turbo</span> writes
+                <span>GLM-5-turbo</span> researches & writes
                 <span>•</span>
-                LangGraph + DuckDuckGo + SSE
+                arXiv + Wikipedia + GitHub + HN + DDG
             </div>
         </header>
 
@@ -442,6 +478,14 @@
             <ul class="questions" id="plan-list"></ul>
         </div>
 
+        <div class="panel" id="routing-panel">
+            <div class="panel-header">
+                <span class="panel-title">Source Routing</span>
+                <span class="panel-meta" id="routing-meta"></span>
+            </div>
+            <div id="routing-list"></div>
+        </div>
+
         <div class="panel" id="sources-panel">
             <div class="panel-header">
                 <span class="panel-title">Sources Found</span>
@@ -484,6 +528,9 @@
         const planPanel = $('plan-panel');
         const planList = $('plan-list');
         const planMeta = $('plan-meta');
+        const routingPanel = $('routing-panel');
+        const routingList = $('routing-list');
+        const routingMeta = $('routing-meta');
         const sourcesPanel = $('sources-panel');
         const sourcesList = $('sources-list');
         const sourcesMeta = $('sources-meta');
@@ -499,8 +546,10 @@
             statusEl.innerHTML = '';
             reportContainer.innerHTML = '';
             planList.innerHTML = '';
+            routingList.innerHTML = '';
             sourcesList.innerHTML = '';
             planPanel.classList.remove('visible');
+            routingPanel.classList.remove('visible');
             sourcesPanel.classList.remove('visible');
             stagesEl.style.display = 'none';
             document.querySelectorAll('.stage').forEach(s => s.classList.remove('active', 'done'));
@@ -595,6 +644,19 @@
                         .map(q => `<li>${escapeHtml(q.replace(/\*\*/g, ''))}</li>`)
                         .join('');
                     planPanel.classList.add('visible');
+                    break;
+                case 'routing':
+                    const routes = data.per_question || [];
+                    routingMeta.textContent = `${routes.length} questions routed`;
+                    routingList.innerHTML = routes.map(r => `
+                        <div class="routing-row">
+                            <div class="routing-q">${escapeHtml(r.question)}</div>
+                            <div class="routing-pills">
+                                ${(r.sources || []).map(s => `<span class="source-pill ${s}">${s}</span>`).join('')}
+                            </div>
+                        </div>
+                    `).join('');
+                    routingPanel.classList.add('visible');
                     break;
                 case 'sources':
                     sourcesMeta.textContent = `${data.found} sources`;
