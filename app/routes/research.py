@@ -42,11 +42,17 @@ async def research_stream(request: ResearchRequest):
         "plan": [],
         "research_notes": [],
         "sources": [],
+        "routing": [],
         "report": "",
     }
 
     # Map each event type to the node that owns it
-    OWNER = {"plan": "planner", "sources": "researcher", "research": "researcher"}
+    OWNER = {
+        "plan": "planner",
+        "sources": "researcher",
+        "research": "researcher",
+        "routing": "researcher",
+    }
 
     async def event_generator():
         yield _sse("start", {"topic": request.topic, "depth": request.depth})
@@ -57,6 +63,7 @@ async def research_stream(request: ResearchRequest):
                 initial_state, stream_mode="updates"
             ):
                 for node_name, delta in chunk.items():
+                    logger.info("LangGraph chunk: node=%s keys=%s", node_name, list((delta or {}).keys()))
                     yield _sse(
                         "stage",
                         {
@@ -72,43 +79,44 @@ async def research_stream(request: ResearchRequest):
 
                     merged_state.update(delta)
 
-                    if (
-                        node_name == OWNER["plan"]
-                        and delta.get("plan")
-                    ):
+                    # Use merged_state since LangGraph's update delta sometimes
+                    # omits keys even when the node wrote them.
+                    src = merged_state
+
+                    if node_name == OWNER["plan"] and src.get("plan"):
                         yield _sse(
                             "plan",
                             {
-                                "questions": delta["plan"],
-                                "count": len(delta["plan"]),
+                                "questions": src["plan"],
+                                "count": len(src["plan"]),
                             },
                         )
 
-                    if (
-                        node_name == OWNER["sources"]
-                        and delta.get("sources")
-                    ):
+                    if node_name == OWNER["sources"] and src.get("sources"):
                         yield _sse(
                             "sources",
                             {
-                                "found": len(delta["sources"]),
+                                "found": len(src["sources"]),
                                 "preview": [
                                     {
                                         "title": s.get("title", ""),
                                         "url": s.get("url", ""),
                                     }
-                                    for s in delta["sources"][:5]
+                                    for s in src["sources"][:5]
                                 ],
                             },
                         )
 
-                    if (
-                        node_name == OWNER["research"]
-                        and delta.get("research_notes")
-                    ):
+                    if node_name == OWNER["routing"] and src.get("routing"):
+                        yield _sse(
+                            "routing",
+                            {"per_question": src["routing"]},
+                        )
+
+                    if node_name == OWNER["research"] and src.get("research_notes"):
                         yield _sse(
                             "research",
-                            {"notes_count": len(delta["research_notes"])},
+                            {"notes_count": len(src["research_notes"])},
                         )
 
             report = state_to_report(request.topic, merged_state)
