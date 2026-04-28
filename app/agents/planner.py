@@ -8,9 +8,8 @@ PLAN_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def run_planner(state: PipelineState) -> PipelineState:
-    from app.config import get_claude_llm
-    model = "opus" if state.get("use_opus_planner") else "sonnet"
-    llm = get_claude_llm(model=model)
+    from app.config import get_planner_llm
+    llm = get_planner_llm(use_opus=bool(state.get("use_opus_planner")))
     chain = PLAN_PROMPT | llm
     response = chain.invoke({"topic": state["topic"], "depth": state["depth"]})
     plan_lines = [line.strip() for line in response.content.split("\n") if line.strip()]
