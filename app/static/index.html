@@ -121,6 +121,33 @@
         .btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 20px var(--accent-glow); }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+        .toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.55rem;
+            padding: 0.65rem 0.9rem;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            cursor: pointer;
+            user-select: none;
+            transition: border-color 0.15s, color 0.15s;
+        }
+        .toggle:hover { border-color: var(--accent); }
+        .toggle input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+        .toggle.on { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-glow); }
+        .toggle .badge {
+            font-size: 0.7rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            background: rgba(120, 80, 200, 0.18);
+            color: #c7b3f5;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
         .examples {
             display: flex;
             gap: 0.5rem;
@@ -443,6 +470,11 @@
                 <option value="brief">Brief</option>
                 <option value="detailed" selected>Detailed</option>
             </select>
+            <label id="opusToggle" class="toggle" title="Run the planner on Claude Opus 4.6 instead of Sonnet">
+                <input type="checkbox" id="useOpus" />
+                <span>Opus planner</span>
+                <span class="badge">4.6</span>
+            </label>
             <button id="run" class="btn">Run research</button>
         </div>
 
@@ -522,6 +554,11 @@
         const $ = id => document.getElementById(id);
         const topicEl = $('topic');
         const depthEl = $('depth');
+        const opusEl = $('useOpus');
+        const opusToggleEl = $('opusToggle');
+        opusEl.addEventListener('change', () => {
+            opusToggleEl.classList.toggle('on', opusEl.checked);
+        });
         const runBtn = $('run');
         const statusEl = $('status');
         const stagesEl = $('stages');
@@ -584,7 +621,11 @@
                 const res = await fetch('/research/stream', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ topic, depth: depthEl.value }),
+                    body: JSON.stringify({
+                        topic,
+                        depth: depthEl.value,
+                        use_opus_planner: opusEl.checked,
+                    }),
                 });
 
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);

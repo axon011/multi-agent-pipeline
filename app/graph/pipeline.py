@@ -91,7 +91,9 @@ def state_to_report(topic: str, final_state: PipelineState) -> ResearchReport:
     )
 
 
-async def run_pipeline(topic: str, depth: str) -> ResearchReport:
+async def run_pipeline(
+    topic: str, depth: str, use_opus_planner: bool = False
+) -> ResearchReport:
     initial_state: PipelineState = {
         "topic": topic,
         "depth": depth,
@@ -100,6 +102,7 @@ async def run_pipeline(topic: str, depth: str) -> ResearchReport:
         "sources": [],
         "routing": [],
         "report": "",
+        "use_opus_planner": use_opus_planner,
     }
 
     final_state = await COMPILED_GRAPH.ainvoke(initial_state)

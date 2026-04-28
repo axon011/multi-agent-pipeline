@@ -10,6 +10,7 @@ class PipelineState(TypedDict, total=False):
     sources: list[dict]  # list of {"title", "url", "snippet"}
     routing: list[dict]  # per-question routing decisions
     report: str
+    use_opus_planner: bool  # if True, planner runs on Opus 4.6 instead of Sonnet
 
 
 class Source(BaseModel):
@@ -21,6 +22,10 @@ class Source(BaseModel):
 class ResearchRequest(BaseModel):
     topic: str = Field(..., min_length=3, description="Topic to research")
     depth: Literal["brief", "detailed"] = "detailed"
+    use_opus_planner: bool = Field(
+        default=False,
+        description="Run the planner on Claude Opus 4.6 instead of Sonnet.",
+    )
 
 
 class ResearchReport(BaseModel):
