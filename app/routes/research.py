@@ -15,7 +15,9 @@ router = APIRouter()
 async def research(request: ResearchRequest):
     """Synchronous endpoint — waits for the full pipeline, returns final report."""
     try:
-        report = await run_pipeline(request.topic, request.depth)
+        report = await run_pipeline(
+            request.topic, request.depth, use_opus_planner=request.use_opus_planner
+        )
         return report
     except Exception as e:
         logger.exception("research pipeline failed")
@@ -44,6 +46,7 @@ async def research_stream(request: ResearchRequest):
         "sources": [],
         "routing": [],
         "report": "",
+        "use_opus_planner": request.use_opus_planner,
     }
 
     # Map each event type to the node that owns it
@@ -55,7 +58,14 @@ async def research_stream(request: ResearchRequest):
     }
 
     async def event_generator():
-        yield _sse("start", {"topic": request.topic, "depth": request.depth})
+        yield _sse(
+            "start",
+            {
+                "topic": request.topic,
+                "depth": request.depth,
+                "planner_model": "opus" if request.use_opus_planner else "sonnet",
+            },
+        )
         merged_state: dict = dict(initial_state)
 
         try:

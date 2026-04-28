@@ -70,18 +70,27 @@ async def _research_one_question(
     search_context = format_results_for_prompt(flat[:8])
 
     chain = RESEARCH_PROMPT | llm
-    response = await chain.ainvoke({
+    payload = {
         "question": cleaned,
         "sources_used": ", ".join(chosen_sources),
         "search_context": search_context,
-    })
+    }
+    # ChatClaudeCode's ainvoke spawns a CLI subprocess via anyio.open_process,
+    # which fails inside uvicorn's running event loop on Windows ("Failed to
+    # start Claude Code"). Pushing the call to a worker thread gives it its
+    # own loop, mirroring how LangGraph runs the (sync) planner node.
+    try:
+        response = await asyncio.to_thread(chain.invoke, payload)
+    except Exception as exc:
+        logger.exception("LLM invoke failed for question %r", cleaned)
+        raise
 
     note = f"**{cleaned}**\n_Sources: {explain_routing(cleaned, chosen_sources)}_\n{response.content}"
     return note, flat, chosen_sources
 
 
 async def _run_researcher_async(state: PipelineState) -> PipelineState:
-    from app.config import get_llm
+    from app.config import LLM_BACKEND, get_llm
 
     llm = get_llm(temperature=0.4)
     questions = [q for q in state.get("plan", []) if q.strip()]
@@ -93,8 +102,20 @@ async def _run_researcher_async(state: PipelineState) -> PipelineState:
         return state
 
     topic = state.get("topic")
-    tasks = [_research_one_question(q, llm, topic=topic) for q in questions]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Claude CLI can't be spawned concurrently — running parallel subprocesses
+    # races on auth/setup and every call fails with "Failed to start Claude Code".
+    # Serialize when on the Claude backend; keep parallelism for HTTP-API LLMs.
+    concurrency = 1 if LLM_BACKEND == "claude" else len(questions)
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _guarded(q):
+        async with sem:
+            return await _research_one_question(q, llm, topic=topic)
+
+    results = await asyncio.gather(
+        *[_guarded(q) for q in questions], return_exceptions=True
+    )
 
     notes: list[str] = []
     all_sources: list[dict] = []
