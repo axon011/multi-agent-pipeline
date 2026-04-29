@@ -28,9 +28,22 @@ def _truncate(text: str, max_chars: int = 500) -> str:
 
 
 def _clean_query(query: str, max_chars: int = 200) -> str:
-    """Strip markdown/punctuation that breaks upstream search APIs (e.g. arXiv 500s on **)."""
+    """Strip markdown/punctuation/dashes that break upstream search APIs.
+
+    Handles:
+      - markdown formatting (** _ ` # > \\)
+      - em/en-dashes (— –) that some APIs reject or treat as phrase delimiters
+      - trailing question marks (arXiv doesn't need them in the query)
+      - collapsed whitespace
+      - hard length cap
+    """
     cleaned = re.sub(r"[*_`#>\\]", " ", query or "")
+    # Replace em/en-dashes with simple spaces; arXiv has been observed to 500 on these.
+    cleaned = cleaned.replace("—", " ").replace("–", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    # Strip trailing question marks — search APIs don't need them and they
+    # occasionally produce stray empty tokens after URL encoding.
+    cleaned = cleaned.rstrip("?")
     return cleaned[:max_chars]
 
 
