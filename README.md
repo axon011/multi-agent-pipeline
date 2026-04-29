@@ -1,36 +1,54 @@
-# Multi-Agent Research Pipeline
+# Multi-Agent Research & Report Pipeline
 
-A LangGraph-orchestrated research agent that breaks a topic into questions,
-fans out to **arXiv, Wikipedia, GitHub, Hacker News, and DuckDuckGo** in
-parallel based on a per-question router, and synthesises a cited markdown
-report. Streams every stage live to the browser over Server-Sent Events.
-
+> **Stack:** LangGraph · FastAPI · Pydantic · Docker · GitHub Actions
 > **Live demo:** _add your Fly URL here after `fly deploy`_
+
+3-agent orchestration pipeline (**Planner → Researcher → Writer**) built on
+LangGraph state machines with **strict role boundaries enforced via Pydantic
+structured outputs**. Produces **2,000+ word research reports with verifiable
+source citations** drawn from arXiv, Wikipedia, GitHub, Hacker News, and
+DuckDuckGo via a per-question router. Deployed as an async FastAPI service
+with Docker containerization and GitHub Actions CI/CD — push to production
+with zero manual intervention.
 
 ![demo](docs/demo.gif)
 *(Drop a 30-second screen recording at `docs/demo.gif` after first deploy.)*
 
 ---
 
-## What's interesting about it
+## Why this is interesting
 
+- **Strict role boundaries.** Each agent's output is parsed into a Pydantic
+  schema (`PipelineState`, `ResearchReport`, `Source`) before the next
+  agent runs. The Researcher cannot fabricate sources because the schema
+  enforces a structured `list[Source]` with `title` / `url` / `snippet`
+  fields; the Writer cannot leak between citations because the report is
+  validated as `ResearchReport` with `key_findings`, `summary`,
+  `full_report`, `word_count`, and a `sources` list.
 - **Per-question source routing.** A rule-based router inspects each
-  sub-question (alongside the original topic) and picks 2–3 sources from
-  arXiv / Wikipedia / GitHub / HN / DDG. "Best vector DB libraries" hits
-  GitHub; "what is GraphRAG" hits Wikipedia; "latest agent frameworks
-  2026" hits Hacker News. The routing decisions are streamed back to the
-  UI so you can see *why* each source was chosen.
-- **Hybrid LLM stack.** Planner runs on Claude (Sonnet by default,
-  togglable to **Opus 4.6**); researcher and writer run on a cheaper
-  OpenAI-compatible model (GLM-5-turbo by default). Toggle the entire
-  stack to Claude with `LLM_BACKEND=claude` for local testing.
-- **All-free sources.** No paid search API. arXiv and Wikipedia have
-  no rate limits; GitHub gives 60 unauth requests/hour; HN/Algolia is
-  unlimited; DDG is best-effort with a worldwide-region filter and a
-  geo-junk heuristic for foreign e-commerce noise.
-- **Live SSE pipeline view.** Stages light up as they run; the routing
-  panel shows source pills per question; the sources panel previews
-  fetched URLs before the writer composes the final report.
+  planner-generated sub-question (alongside the original topic) and picks
+  2–3 sources from arXiv / Wikipedia / GitHub / HN / DDG. "Best vector DB
+  libraries" hits GitHub; "what is GraphRAG" hits Wikipedia; "latest agent
+  frameworks 2026" hits Hacker News. The routing decision for each
+  sub-question is streamed back to the UI so you can see *why* a source
+  was chosen.
+- **Verifiable citations.** Every claim in the final report carries `[1]
+  [2] [3]` markers that map to the `sources` array — citations are not
+  free-text, they are array indices into a structured-output Pydantic
+  list, which makes them tamper-evident.
+- **Hybrid LLM stack with cost control.** Planner runs on Claude (Sonnet
+  default, togglable to **Opus 4.6** via UI flag); Researcher and Writer
+  run on a cheaper OpenAI-compatible model (GLM-5-turbo by default).
+  `LLM_BACKEND=claude` routes the whole pipeline through the Claude CLI
+  for local testing without API spend.
+- **Async fan-out, throttled by backend.** The Researcher dispatches all
+  N sub-questions in parallel via `asyncio.gather` against rate-friendly
+  HTTP-API LLMs; an `asyncio.Semaphore(1)` serializes calls automatically
+  when the backend is the Claude CLI (which can't be spawned
+  concurrently).
+- **Live SSE pipeline view.** Stage transitions, the per-question routing
+  panel, and previewed source URLs all stream to the browser via
+  Server-Sent Events before the Writer composes the final report.
 
 ## Architecture
 
