@@ -470,6 +470,10 @@
                 <option value="brief">Brief</option>
                 <option value="detailed" selected>Detailed</option>
             </select>
+            <select id="engine" class="select" title="Orchestration framework">
+                <option value="langgraph" selected>LangGraph</option>
+                <option value="crew">CrewAI</option>
+            </select>
             <label id="opusToggle" class="toggle" title="Run the planner on Claude Opus 4.6 instead of Sonnet">
                 <input type="checkbox" id="useOpus" />
                 <span>Opus planner</span>
@@ -554,6 +558,7 @@
         const $ = id => document.getElementById(id);
         const topicEl = $('topic');
         const depthEl = $('depth');
+        const engineEl = $('engine');
         const opusEl = $('useOpus');
         const opusToggleEl = $('opusToggle');
         opusEl.addEventListener('change', () => {
@@ -625,6 +630,7 @@
                         topic,
                         depth: depthEl.value,
                         use_opus_planner: opusEl.checked,
+                        engine: engineEl.value,
                     }),
                 });
 

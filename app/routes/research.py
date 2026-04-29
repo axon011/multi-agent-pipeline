@@ -15,9 +15,20 @@ router = APIRouter()
 async def research(request: ResearchRequest):
     """Synchronous endpoint — waits for the full pipeline, returns final report."""
     try:
-        report = await run_pipeline(
-            request.topic, request.depth, use_opus_planner=request.use_opus_planner
-        )
+        if request.engine == "crew":
+            from app.crew.pipeline import run_crew_pipeline
+
+            report = await run_crew_pipeline(
+                request.topic,
+                request.depth,
+                use_opus_planner=request.use_opus_planner,
+            )
+        else:
+            report = await run_pipeline(
+                request.topic,
+                request.depth,
+                use_opus_planner=request.use_opus_planner,
+            )
         return report
     except Exception as e:
         logger.exception("research pipeline failed")
@@ -64,9 +75,92 @@ async def research_stream(request: ResearchRequest):
                 "topic": request.topic,
                 "depth": request.depth,
                 "planner_model": "opus" if request.use_opus_planner else "sonnet",
+                "engine": request.engine,
             },
         )
         merged_state: dict = dict(initial_state)
+
+        # CrewAI engine — emit the same event shapes by orchestrating the
+        # phases manually. CrewAI's Crew.kickoff doesn't stream per-node
+        # deltas the way LangGraph's astream does, so we run each phase
+        # ourselves and yield equivalent stage/plan/sources/routing/research
+        # events around it. Keeps the SSE contract identical.
+        if request.engine == "crew":
+            try:
+                from app.crew.pipeline import (
+                    _build_planner_crew,
+                    _build_writer_crew,
+                    _parse_plan_output,
+                )
+                from app.agents.researcher import _run_researcher_async
+                import asyncio as _aio
+
+                # Phase 1 — Planner
+                yield _sse(
+                    "stage",
+                    {"node": "planner", "label": STAGE_LABELS["planner"]},
+                )
+                planner_crew = _build_planner_crew(request.use_opus_planner)
+                plan_result = await _aio.to_thread(
+                    planner_crew.kickoff,
+                    {"topic": request.topic, "depth": request.depth},
+                )
+                plan = _parse_plan_output(
+                    getattr(plan_result, "raw", str(plan_result))
+                )
+                merged_state["plan"] = plan
+                yield _sse("plan", {"questions": plan, "count": len(plan)})
+
+                # Phase 2 — shared researcher
+                yield _sse(
+                    "stage",
+                    {"node": "researcher", "label": STAGE_LABELS["researcher"]},
+                )
+                researched = await _run_researcher_async(dict(merged_state))
+                merged_state.update(researched)
+                if merged_state.get("sources"):
+                    yield _sse(
+                        "sources",
+                        {
+                            "found": len(merged_state["sources"]),
+                            "preview": [
+                                {"title": s.get("title", ""), "url": s.get("url", "")}
+                                for s in merged_state["sources"][:5]
+                            ],
+                        },
+                    )
+                if merged_state.get("routing"):
+                    yield _sse("routing", {"per_question": merged_state["routing"]})
+                if merged_state.get("research_notes"):
+                    yield _sse(
+                        "research",
+                        {"notes_count": len(merged_state["research_notes"])},
+                    )
+
+                # Phase 3 — Writer
+                yield _sse(
+                    "stage",
+                    {"node": "writer", "label": STAGE_LABELS["writer"]},
+                )
+                notes_text = "\n\n".join(merged_state.get("research_notes", []) or [])
+                if not notes_text.strip():
+                    merged_state["report"] = "_(research phase returned no notes)_"
+                else:
+                    writer_crew = _build_writer_crew(request.use_opus_planner)
+                    write_result = await _aio.to_thread(
+                        writer_crew.kickoff,
+                        {"topic": request.topic, "notes": notes_text},
+                    )
+                    merged_state["report"] = getattr(
+                        write_result, "raw", str(write_result)
+                    )
+
+                report = state_to_report(request.topic, merged_state)
+                yield _sse("complete", report.model_dump())
+            except Exception as e:
+                logger.exception("crew streaming pipeline failed")
+                yield _sse("error", {"message": str(e)})
+            return
 
         try:
             async for chunk in COMPILED_GRAPH.astream(
