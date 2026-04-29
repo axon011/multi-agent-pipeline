@@ -26,6 +26,13 @@ class ResearchRequest(BaseModel):
         default=False,
         description="Run the planner on Claude Opus 4.6 instead of Sonnet.",
     )
+    engine: Literal["langgraph", "crew"] = Field(
+        default="langgraph",
+        description=(
+            "Orchestration engine. 'langgraph' (default) uses the typed-state "
+            "graph pipeline; 'crew' runs the same 3 roles via CrewAI Agents/Tasks."
+        ),
+    )
 
 
 class ResearchReport(BaseModel):
