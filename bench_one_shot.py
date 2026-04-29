@@ -41,7 +41,10 @@ async def main() -> None:
     print(f"Starting pipeline...\n")
 
     start = time.perf_counter()
-    report = await run_pipeline(topic, depth=3, use_opus_planner=False)
+    # depth is a string the planner reads in its prompt: "brief" or "detailed".
+    # Passing an int silently produced a meaningless "Depth: 3" — the pipeline
+    # still ran, but the depth control did nothing.
+    report = await run_pipeline(topic, depth="detailed", use_opus_planner=False)
     elapsed = time.perf_counter() - start
 
     out_dir = Path("bench_output")
