@@ -94,16 +94,31 @@ def state_to_report(topic: str, final_state: PipelineState) -> ResearchReport:
 async def run_pipeline(
     topic: str, depth: str, use_opus_planner: bool = False
 ) -> ResearchReport:
-    initial_state: PipelineState = {
-        "topic": topic,
-        "depth": depth,
-        "plan": [],
-        "research_notes": [],
-        "sources": [],
-        "routing": [],
-        "report": "",
-        "use_opus_planner": use_opus_planner,
-    }
+    from app.observability import observe, update_current_trace
 
-    final_state = await COMPILED_GRAPH.ainvoke(initial_state)
-    return state_to_report(topic, final_state)
+    @observe(name="run_pipeline.langgraph", as_type="chain", capture_input=False, capture_output=False)
+    async def _traced() -> ResearchReport:
+        update_current_trace(
+            name="research-pipeline",
+            input={"topic": topic, "depth": depth, "use_opus_planner": use_opus_planner},
+            metadata={"engine": "langgraph"},
+            tags=["langgraph", "research"],
+        )
+        initial_state: PipelineState = {
+            "topic": topic,
+            "depth": depth,
+            "plan": [],
+            "research_notes": [],
+            "sources": [],
+            "routing": [],
+            "report": "",
+            "use_opus_planner": use_opus_planner,
+        }
+        final_state = await COMPILED_GRAPH.ainvoke(initial_state)
+        report = state_to_report(topic, final_state)
+        update_current_trace(
+            output={"word_count": report.word_count, "source_count": len(report.sources)},
+        )
+        return report
+
+    return await _traced()

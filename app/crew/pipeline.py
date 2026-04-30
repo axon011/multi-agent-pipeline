@@ -30,6 +30,7 @@ from app.agents.researcher import _run_researcher_async
 from app.crew.llm import ClaudeCodeCrewLLM
 from app.graph.pipeline import state_to_report
 from app.models.schemas import PipelineState, ResearchReport
+from app.observability import observe, trace_llm, update_current, update_current_trace
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +115,34 @@ def _parse_plan_output(raw: str) -> list[str]:
     return [ln for ln in lines if not ln.startswith(("#", "**Research"))]
 
 
+@observe(name="run_pipeline.crew", as_type="chain", capture_input=False, capture_output=False)
 async def run_crew_pipeline(
     topic: str,
     depth: str,
     use_opus_planner: bool = False,
 ) -> ResearchReport:
     """Same contract as `run_pipeline` — engine-swap should be invisible."""
+    update_current_trace(
+        name="research-pipeline",
+        input={"topic": topic, "depth": depth, "use_opus_planner": use_opus_planner},
+        metadata={"engine": "crew"},
+        tags=["crewai", "research"],
+    )
+
     # Phase 1 — Planner crew (CrewAI). Run sync invoke in a thread because
     # ChatClaudeCode shells out a subprocess and uvicorn's running loop
     # can't host another loop.
     planner_crew = _build_planner_crew(use_opus_planner)
-    plan_result = await asyncio.to_thread(
-        planner_crew.kickoff, {"topic": topic, "depth": depth}
-    )
+    model_label = "claude-opus-4-6" if use_opus_planner else "claude-sonnet-4-5"
+    with trace_llm(
+        "crew.planner.kickoff",
+        model=model_label,
+        input={"topic": topic, "depth": depth},
+    ):
+        plan_result = await asyncio.to_thread(
+            planner_crew.kickoff, {"topic": topic, "depth": depth}
+        )
+        update_current(output=getattr(plan_result, "raw", str(plan_result)))
     plan = _parse_plan_output(getattr(plan_result, "raw", str(plan_result)))
     logger.info("crew planner produced %d questions", len(plan))
 
@@ -152,9 +168,19 @@ async def run_crew_pipeline(
         state["report"] = "_(research phase returned no notes)_"
     else:
         writer_crew = _build_writer_crew(use_opus_planner)
-        write_result = await asyncio.to_thread(
-            writer_crew.kickoff, {"topic": topic, "notes": notes_text}
-        )
+        with trace_llm(
+            "crew.writer.kickoff",
+            model="claude-sonnet-4-5",
+            input={"topic": topic, "note_count": len(state.get("research_notes", []))},
+        ):
+            write_result = await asyncio.to_thread(
+                writer_crew.kickoff, {"topic": topic, "notes": notes_text}
+            )
+            update_current(output=getattr(write_result, "raw", str(write_result)))
         state["report"] = getattr(write_result, "raw", str(write_result))
 
-    return state_to_report(topic, state)
+    report = state_to_report(topic, state)
+    update_current_trace(
+        output={"word_count": report.word_count, "source_count": len(report.sources)},
+    )
+    return report

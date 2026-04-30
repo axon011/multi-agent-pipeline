@@ -1,6 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.models.schemas import PipelineState
+from app.observability import observe, trace_llm, update_current
 
 WRITE_PROMPT = ChatPromptTemplate.from_messages([
     (
@@ -32,12 +33,22 @@ WRITE_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+@observe(name="writer", as_type="agent", capture_input=False, capture_output=False)
 def run_writer(state: PipelineState) -> PipelineState:
     from app.config import get_llm
 
     llm = get_llm(temperature=0.5)
     notes_text = "\n\n".join(state.get("research_notes", []))
     chain = WRITE_PROMPT | llm
-    response = chain.invoke({"topic": state["topic"], "notes": notes_text})
+    payload = {"topic": state["topic"], "notes": notes_text}
+
+    with trace_llm(
+        "writer.compose",
+        model="claude-sonnet-4-5",
+        input={"topic": state["topic"], "note_count": len(state.get("research_notes", []))},
+    ):
+        response = chain.invoke(payload)
+        update_current(output=response.content)
+
     state["report"] = response.content
     return state

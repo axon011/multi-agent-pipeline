@@ -49,6 +49,11 @@ with zero manual intervention.
 - **Live SSE pipeline view.** Stage transitions, the per-question routing
   panel, and previewed source URLs all stream to the browser via
   Server-Sent Events before the Writer composes the final report.
+- **Langfuse observability.** Every agent and LLM call is wrapped in
+  `@observe` / `trace_llm` spans capturing input, output, model, latency,
+  routing decisions, and source counts. The instrumentation degrades to
+  a no-op when `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` aren't set,
+  so the pipeline runs unchanged without an account.
 
 ## Architecture
 
