@@ -5,6 +5,7 @@ import re
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.models.schemas import PipelineState
+from app.observability import observe, trace_llm, update_current
 from app.tools.router import explain_routing, route_sources
 from app.tools.search import (
     SearchResult,
@@ -80,7 +81,14 @@ async def _research_one_question(
     # start Claude Code"). Pushing the call to a worker thread gives it its
     # own loop, mirroring how LangGraph runs the (sync) planner node.
     try:
-        response = await asyncio.to_thread(chain.invoke, payload)
+        with trace_llm(
+            "researcher.synthesize",
+            model="claude-sonnet-4-5",
+            input={"question": cleaned, "sources_used": chosen_sources},
+            metadata={"num_results": len(flat[:8]), "routing": chosen_sources},
+        ):
+            response = await asyncio.to_thread(chain.invoke, payload)
+            update_current(output=response.content)
     except Exception as exc:
         logger.exception("LLM invoke failed for question %r", cleaned)
         raise
@@ -89,6 +97,7 @@ async def _research_one_question(
     return note, flat, chosen_sources
 
 
+@observe(name="researcher", as_type="agent", capture_input=False, capture_output=False)
 async def _run_researcher_async(state: PipelineState) -> PipelineState:
     from app.config import LLM_BACKEND, get_llm
 
