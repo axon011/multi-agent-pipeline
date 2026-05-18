@@ -37,6 +37,24 @@ _PATTERNS = {
     ],
 }
 
+_COMPILED_PATTERNS = {
+    source: re.compile(
+        "|".join(f"(?:{pattern})" for pattern in patterns),
+        flags=re.IGNORECASE,
+    )
+    for source, patterns in _PATTERNS.items()
+}
+
+_FALLBACK_SOURCES = ("wikipedia", "duckduckgo")
+
+_SOURCE_REASONS = {
+    "arxiv": "academic papers",
+    "wikipedia": "concept definition",
+    "github": "code/tools",
+    "hackernews": "trends/discussion",
+    "duckduckgo": "general web",
+}
+
 
 def route_sources(
     query: str,
@@ -54,43 +72,36 @@ def route_sources(
     sets always_include_web=False. arXiv and Wikipedia are skipped if
     nothing else matches them — we only use them when they're a good fit.
     """
-    haystack = (query + " \n " + (topic or "")).lower()
+    haystack = query + " \n " + (topic or "")
     chosen: list[str] = []
+    chosen_set: set[str] = set()
 
-    for source, patterns in _PATTERNS.items():
-        for pat in patterns:
-            if re.search(pat, haystack):
-                chosen.append(source)
-                break
+    def _append(source: str) -> None:
+        if source not in chosen_set:
+            chosen.append(source)
+            chosen_set.add(source)
 
-    if always_include_web and "duckduckgo" not in chosen:
-        chosen.append("duckduckgo")
+    for source, pattern in _COMPILED_PATTERNS.items():
+        if pattern.search(haystack):
+            _append(source)
+
+    if always_include_web:
+        _append("duckduckgo")
 
     # Always seed with at least 2 sources for redundancy
     if len(chosen) < 2:
-        for fallback in ("wikipedia", "duckduckgo"):
-            if fallback not in chosen:
-                chosen.append(fallback)
+        fallback_sources = (
+            _FALLBACK_SOURCES
+            if always_include_web
+            else tuple(source for source in _FALLBACK_SOURCES if source != "duckduckgo")
+        )
+        for fallback in fallback_sources:
+            _append(fallback)
             if len(chosen) >= 2:
                 break
-
-    # De-dupe while preserving order
-    seen = set()
-    ordered = []
-    for s in chosen:
-        if s not in seen:
-            seen.add(s)
-            ordered.append(s)
-    return ordered
+    return chosen
 
 
 def explain_routing(query: str, sources: list[str]) -> str:
     """Human-readable explanation of why these sources were picked."""
-    reasons = {
-        "arxiv": "academic papers",
-        "wikipedia": "concept definition",
-        "github": "code/tools",
-        "hackernews": "trends/discussion",
-        "duckduckgo": "general web",
-    }
-    return ", ".join(f"{s} ({reasons.get(s, '?')})" for s in sources)
+    return ", ".join(f"{s} ({_SOURCE_REASONS.get(s, '?')})" for s in sources)
