@@ -120,11 +120,17 @@ async def run_crew_pipeline(
     topic: str,
     depth: str,
     use_opus_planner: bool = False,
+    enable_critic: bool = True,
 ) -> ResearchReport:
     """Same contract as `run_pipeline` — engine-swap should be invisible."""
     update_current_trace(
         name="research-pipeline",
-        input={"topic": topic, "depth": depth, "use_opus_planner": use_opus_planner},
+        input={
+            "topic": topic,
+            "depth": depth,
+            "use_opus_planner": use_opus_planner,
+            "enable_critic": enable_critic,
+        },
         metadata={"engine": "crew"},
         tags=["crewai", "research"],
     )
@@ -156,6 +162,8 @@ async def run_crew_pipeline(
         "routing": [],
         "report": "",
         "use_opus_planner": use_opus_planner,
+        "enable_critic": enable_critic,
+        "critique_iterations": 0,
     }
     state = await _run_researcher_async(state)
 
@@ -179,8 +187,46 @@ async def run_crew_pipeline(
             update_current(output=getattr(write_result, "raw", str(write_result)))
         state["report"] = getattr(write_result, "raw", str(write_result))
 
+    # Phase 4 — Critic + optional one-shot repair (shared with LangGraph engine).
+    if enable_critic and state.get("report", "").strip():
+        from app.agents.critic import (
+            REPAIR_THRESHOLD,
+            _critique_async,
+            repair_report,
+        )
+        from app.config import get_llm
+
+        critic_llm = get_llm(temperature=0.1)
+        critique = await _critique_async(
+            state["report"], state.get("sources", []) or [], critic_llm
+        )
+        state["critique"] = critique.model_dump()
+        has_unsupported = any(
+            v.verdict == "unsupported" for v in critique.verdicts
+        )
+        if critique.score < REPAIR_THRESHOLD and has_unsupported:
+            repair_llm = get_llm(temperature=0.4)
+            revised = await repair_report(
+                state["report"],
+                critique,
+                state.get("sources", []) or [],
+                repair_llm,
+            )
+            state["report"] = revised
+            rechecked = await _critique_async(
+                revised, state.get("sources", []) or [], critic_llm
+            )
+            rechecked.repaired = True
+            rechecked.iterations = 2
+            state["critique"] = rechecked.model_dump()
+            state["critique_iterations"] = 1
+
     report = state_to_report(topic, state)
     update_current_trace(
-        output={"word_count": report.word_count, "source_count": len(report.sources)},
+        output={
+            "word_count": report.word_count,
+            "source_count": len(report.sources),
+            "critique_score": report.critique.score if report.critique else None,
+        },
     )
     return report

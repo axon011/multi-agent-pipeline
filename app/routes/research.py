@@ -22,12 +22,14 @@ async def research(request: ResearchRequest):
                 request.topic,
                 request.depth,
                 use_opus_planner=request.use_opus_planner,
+                enable_critic=request.enable_critic,
             )
         else:
             report = await run_pipeline(
                 request.topic,
                 request.depth,
                 use_opus_planner=request.use_opus_planner,
+                enable_critic=request.enable_critic,
             )
         return report
     except Exception as e:
@@ -43,6 +45,8 @@ STAGE_LABELS = {
     "planner": "Planning research questions",
     "researcher": "Searching the web and synthesizing findings",
     "writer": "Drafting the final report",
+    "critic": "Auditing citations against sources",
+    "writer_repair": "Repairing unsupported claims",
 }
 
 
@@ -58,15 +62,20 @@ async def research_stream(request: ResearchRequest):
         "routing": [],
         "report": "",
         "use_opus_planner": request.use_opus_planner,
+        "enable_critic": request.enable_critic,
+        "critique_iterations": 0,
     }
 
-    # Map each event type to the node that owns it
+    # Map each event type to the node that owns it. critic and writer_repair
+    # both write into the 'critique' key, so either node firing emits the
+    # critique SSE event.
     OWNER = {
         "plan": "planner",
         "sources": "researcher",
         "research": "researcher",
         "routing": "researcher",
     }
+    CRITIQUE_OWNERS = {"critic", "writer_repair"}
 
     async def event_generator():
         yield _sse(
@@ -76,6 +85,7 @@ async def research_stream(request: ResearchRequest):
                 "depth": request.depth,
                 "planner_model": "opus" if request.use_opus_planner else "sonnet",
                 "engine": request.engine,
+                "enable_critic": request.enable_critic,
             },
         )
         merged_state: dict = dict(initial_state)
@@ -155,6 +165,74 @@ async def research_stream(request: ResearchRequest):
                         write_result, "raw", str(write_result)
                     )
 
+                # Phase 4 — Critic + optional repair (CrewAI streaming)
+                if request.enable_critic and merged_state.get("report", "").strip():
+                    from app.agents.critic import (
+                        REPAIR_THRESHOLD,
+                        _critique_async,
+                        repair_report,
+                    )
+                    from app.config import get_llm
+
+                    yield _sse(
+                        "stage",
+                        {"node": "critic", "label": STAGE_LABELS["critic"]},
+                    )
+                    critic_llm = get_llm(temperature=0.1)
+                    critique = await _critique_async(
+                        merged_state["report"],
+                        merged_state.get("sources", []) or [],
+                        critic_llm,
+                    )
+                    merged_state["critique"] = critique.model_dump()
+                    yield _sse(
+                        "critique",
+                        {
+                            "score": critique.score,
+                            "supported": critique.supported_count,
+                            "unsupported": critique.unsupported_count,
+                            "total_claims": len(critique.verdicts),
+                            "repaired": False,
+                        },
+                    )
+                    if (
+                        critique.score < REPAIR_THRESHOLD
+                        and critique.unsupported_count > 0
+                    ):
+                        yield _sse(
+                            "stage",
+                            {
+                                "node": "writer_repair",
+                                "label": STAGE_LABELS["writer_repair"],
+                            },
+                        )
+                        repair_llm = get_llm(temperature=0.4)
+                        revised = await repair_report(
+                            merged_state["report"],
+                            critique,
+                            merged_state.get("sources", []) or [],
+                            repair_llm,
+                        )
+                        merged_state["report"] = revised
+                        rechecked = await _critique_async(
+                            revised,
+                            merged_state.get("sources", []) or [],
+                            critic_llm,
+                        )
+                        rechecked.repaired = True
+                        rechecked.iterations = 2
+                        merged_state["critique"] = rechecked.model_dump()
+                        yield _sse(
+                            "critique",
+                            {
+                                "score": rechecked.score,
+                                "supported": rechecked.supported_count,
+                                "unsupported": rechecked.unsupported_count,
+                                "total_claims": len(rechecked.verdicts),
+                                "repaired": True,
+                            },
+                        )
+
                 report = state_to_report(request.topic, merged_state)
                 yield _sse("complete", report.model_dump())
             except Exception as e:
@@ -221,6 +299,27 @@ async def research_stream(request: ResearchRequest):
                         yield _sse(
                             "research",
                             {"notes_count": len(src["research_notes"])},
+                        )
+
+                    if node_name in CRITIQUE_OWNERS and src.get("critique"):
+                        critique_dict = src["critique"]
+                        yield _sse(
+                            "critique",
+                            {
+                                "score": critique_dict.get("score"),
+                                "supported": sum(
+                                    1
+                                    for v in critique_dict.get("verdicts", [])
+                                    if v.get("verdict") == "supported"
+                                ),
+                                "unsupported": sum(
+                                    1
+                                    for v in critique_dict.get("verdicts", [])
+                                    if v.get("verdict") == "unsupported"
+                                ),
+                                "total_claims": len(critique_dict.get("verdicts", [])),
+                                "repaired": critique_dict.get("repaired", False),
+                            },
                         )
 
             report = state_to_report(request.topic, merged_state)
