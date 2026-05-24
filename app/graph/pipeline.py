@@ -2,10 +2,11 @@ import re
 
 from langgraph.graph import StateGraph, END
 
+from app.agents.critic import needs_repair, run_critic, run_writer_repair
 from app.agents.planner import run_planner
 from app.agents.researcher import arun_researcher
 from app.agents.writer import run_writer
-from app.models.schemas import PipelineState, ResearchReport, Source
+from app.models.schemas import CritiqueReport, PipelineState, ResearchReport, Source
 
 
 def build_graph():
@@ -14,11 +15,22 @@ def build_graph():
     graph.add_node("planner", run_planner)
     graph.add_node("researcher", arun_researcher)  # async node
     graph.add_node("writer", run_writer)
+    graph.add_node("critic", run_critic)  # async node
+    graph.add_node("writer_repair", run_writer_repair)  # async node
 
     graph.set_entry_point("planner")
     graph.add_edge("planner", "researcher")
     graph.add_edge("researcher", "writer")
-    graph.add_edge("writer", END)
+    graph.add_edge("writer", "critic")
+    # Conditional edge — bounce to repair once if critique score is low,
+    # otherwise end. The needs_repair function enforces the cap so we
+    # can't loop forever.
+    graph.add_conditional_edges(
+        "critic",
+        needs_repair,
+        {"repair": "writer_repair", "end": END},
+    )
+    graph.add_edge("writer_repair", END)
 
     return graph.compile()
 
@@ -81,6 +93,9 @@ def state_to_report(topic: str, final_state: PipelineState) -> ResearchReport:
         for s in sources_raw
     ]
 
+    critique_dict = final_state.get("critique")
+    critique = CritiqueReport.model_validate(critique_dict) if critique_dict else None
+
     return ResearchReport(
         topic=topic,
         summary=_build_summary(report_text),
@@ -88,11 +103,15 @@ def state_to_report(topic: str, final_state: PipelineState) -> ResearchReport:
         full_report=report_text,
         sources=sources,
         word_count=len(report_text.split()),
+        critique=critique,
     )
 
 
 async def run_pipeline(
-    topic: str, depth: str, use_opus_planner: bool = False
+    topic: str,
+    depth: str,
+    use_opus_planner: bool = False,
+    enable_critic: bool = True,
 ) -> ResearchReport:
     from app.observability import observe, update_current_trace
 
@@ -100,7 +119,12 @@ async def run_pipeline(
     async def _traced() -> ResearchReport:
         update_current_trace(
             name="research-pipeline",
-            input={"topic": topic, "depth": depth, "use_opus_planner": use_opus_planner},
+            input={
+                "topic": topic,
+                "depth": depth,
+                "use_opus_planner": use_opus_planner,
+                "enable_critic": enable_critic,
+            },
             metadata={"engine": "langgraph"},
             tags=["langgraph", "research"],
         )
@@ -113,11 +137,17 @@ async def run_pipeline(
             "routing": [],
             "report": "",
             "use_opus_planner": use_opus_planner,
+            "enable_critic": enable_critic,
+            "critique_iterations": 0,
         }
         final_state = await COMPILED_GRAPH.ainvoke(initial_state)
         report = state_to_report(topic, final_state)
         update_current_trace(
-            output={"word_count": report.word_count, "source_count": len(report.sources)},
+            output={
+                "word_count": report.word_count,
+                "source_count": len(report.sources),
+                "critique_score": report.critique.score if report.critique else None,
+            },
         )
         return report
 
