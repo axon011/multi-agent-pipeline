@@ -3,15 +3,20 @@
 > **Stack:** LangGraph · CrewAI · FastAPI · Pydantic · Langfuse · Docker · GitHub Actions
 > **Live demo:** _add your Fly URL here after `fly deploy`_
 
-3-agent orchestration pipeline (**Planner → Researcher → Writer**) wired
-across **two interchangeable engines** — a LangGraph typed-state machine
-and a CrewAI sequential crew — selectable per request. Strict role
-boundaries are enforced via Pydantic structured outputs. Produces
-**2,000+ word research reports with verifiable source citations** drawn
-from arXiv, Wikipedia, GitHub, Hacker News, and DuckDuckGo via a
-per-question router. Deployed as an async FastAPI service with Docker
-containerization, GitHub Actions CI/CD, and Langfuse observability on
-every agent and LLM call.
+4-agent orchestration pipeline (**Planner → Researcher → Writer →
+Critic**) wired across **two interchangeable engines** — a LangGraph
+typed-state machine with a conditional repair edge and a CrewAI
+sequential crew — selectable per request. Strict role boundaries are
+enforced via Pydantic structured outputs. The Critic audits every
+citation against its source snippet and triggers a one-shot Writer
+repair pass when grounding is too low, making the pipeline
+**self-correcting**. Produces **2,000+ word research reports with
+verifiable source citations** drawn from arXiv, Wikipedia, GitHub,
+Hacker News, and DuckDuckGo via a per-question router. Deployed as an
+async FastAPI service with Docker containerization, GitHub Actions
+CI/CD, and Langfuse observability on every agent and LLM call. Ships
+with a YAML-driven eval harness that scores runs on citation validity,
+grounding, source diversity, and routing precision.
 
 ![demo](docs/demo.gif)
 *(Drop a 30-second screen recording at `docs/demo.gif` after first deploy.)*
@@ -20,13 +25,32 @@ every agent and LLM call.
 
 ## Why this is interesting
 
+- **Self-correcting via the Critic agent.** After the Writer, a fourth
+  `critic` node extracts every `[N]`-cited sentence, looks up the cited
+  snippets in `sources`, and asks the worker LLM for a per-claim verdict
+  (`supported / partial / unsupported / no_citation`). The aggregate
+  grounding score is exposed on `ResearchReport.critique`. If the score
+  drops below `REPAIR_THRESHOLD` (0.75) **and** there is at least one
+  `unsupported` claim, a conditional LangGraph edge routes to a
+  `writer_repair` node that rewrites only the flagged claims — capped
+  at one repair pass so cost is bounded. Disable via `enable_critic:
+  false` in the request body. See `app/agents/critic.py`.
 - **Two engines, one SSE contract.** Send `"engine": "langgraph"` (default)
   or `"engine": "crew"` and get identical `start / stage / plan / routing
-  / sources / research / complete` event shapes back. LangGraph runs a
-  typed `PipelineState` through a compiled graph; CrewAI runs sequential
+  / sources / research / critique / complete` event shapes back.
+  LangGraph runs a typed `PipelineState` through a compiled graph with
+  the conditional critic→repair edge; CrewAI runs sequential
   `Crew.kickoff` calls wrapped in manual phase orchestration so the SSE
-  stream still emits per-stage deltas. Same Researcher node is shared
-  between both engines — the divergence is only in planning and writing.
+  stream still emits per-stage deltas. The Researcher and Critic are
+  shared between both engines — the divergence is only in planning and
+  writing.
+- **Eval harness built on the same Critic.** `python -m eval.run` pushes
+  a curated 10-topic set (in `eval/topics.yaml`, spanning the five
+  routing categories) through the pipeline and scores each run on six
+  metrics — `citation_validity`, `citation_grounding` (reuses the
+  Critic), `source_diversity`, `routing_precision`, `word_count`,
+  `elapsed_seconds`. Outputs a per-topic JSON dump and an aggregate
+  markdown table. See `eval/README.md`.
 - **Strict role boundaries.** Each agent's output is parsed into a Pydantic
   schema (`PipelineState`, `ResearchReport`, `Source`) before the next
   agent runs. The Researcher cannot fabricate sources because the schema
@@ -98,12 +122,21 @@ every agent and LLM call.
                  │ assemble report  │
                  └────────┬─────────┘
                           ▼
-                  Markdown + sources
-                  streamed via SSE
-                          │
+                 ┌──────────────────┐
+                 │     Critic       │  audit each [N] claim against
+                 │ verdict per claim│  its source snippet → score
+                 └────────┬─────────┘
                           ▼
-                  Langfuse traces
-                  (agents + LLM calls)
+                 ┌── score<0.75 ──┐
+                 │                │
+                 ▼                ▼
+       ┌────────────────┐    Markdown + sources +
+       │ Writer repair  │    critique streamed via SSE
+       │ (one pass max) │           │
+       └────────┬───────┘           │
+                ▼                   ▼
+              re-critique     Langfuse traces
+                                    (agents + LLM calls)
 ```
 
 ## Quickstart (local)
@@ -149,20 +182,49 @@ curl -N -X POST http://localhost:8000/research/stream \
         "topic": "GraphRAG explained",
         "depth": "brief",
         "use_opus_planner": true,
-        "engine": "langgraph"
+        "engine": "langgraph",
+        "enable_critic": true
       }'
 ```
 
 `engine` accepts `"langgraph"` (default) or `"crew"`. Both produce the
 same event sequence: `start`, `stage`, `plan`, `routing`, `sources`,
-`research`, `complete` (or `error`). Each event's payload is a JSON
-object — see `app/routes/research.py` for the schema.
+`research`, `critique`, `complete` (or `error`). The `critique` event
+carries `{score, supported, unsupported, total_claims, repaired}`. Set
+`enable_critic: false` to skip the audit + repair entirely. Each
+event's payload is a JSON object — see `app/routes/research.py` for the
+schema.
 
 ### `POST /research/`  (synchronous)
 
 Returns the final `ResearchReport` (topic, summary, key_findings,
-full_report, sources, word_count) once the pipeline completes. Honors
-the same `engine` field.
+full_report, sources, word_count, critique) once the pipeline
+completes. Honors the same `engine` and `enable_critic` fields. The
+`critique` field is `null` when `enable_critic=false`.
+
+## Eval
+
+```bash
+# Defaults: langgraph engine, brief depth, critic on
+python -m eval.run
+
+# Smoke run
+python -m eval.run --limit 3
+
+# CrewAI engine
+python -m eval.run --engine crew
+```
+
+Outputs land in `eval_output/<timestamp>/`:
+
+- `summary.md` — markdown table + aggregate metrics
+- `summary.json` — machine-readable metrics
+- `<topic-slug>.json` — full report + per-topic metrics
+
+Six metrics per topic: `citation_validity` (free), `citation_grounding`
+(reuses the Critic), `source_diversity`, `routing_precision`,
+`word_count`, `elapsed_seconds`. See `eval/README.md` for details and
+cost notes.
 
 ## Deploy (Fly.io)
 
@@ -189,19 +251,24 @@ URL into the badge at the top of this README.
 
 ## Tech
 
-Python 3.11 · FastAPI · LangGraph · CrewAI · LangChain ·
-langchain-claude-code · ChatOpenAI (any OpenAI-compatible provider) ·
-Pydantic v2 · Langfuse · httpx · ddgs · arXiv API · Wikipedia API ·
-GitHub Search API · HN/Algolia API.
+Python 3.11 · FastAPI · LangGraph (conditional edges + typed state) ·
+CrewAI · LangChain · langchain-claude-code · ChatOpenAI (any
+OpenAI-compatible provider) · Pydantic v2 · Langfuse · httpx · ddgs ·
+PyYAML · arXiv API · Wikipedia API · GitHub Search API · HN/Algolia
+API.
 
 ## Files worth reading
 
-- `app/graph/pipeline.py` — LangGraph wiring + state-to-report
-- `app/crew/pipeline.py` — CrewAI sequential crews (planner + writer)
+- `app/graph/pipeline.py` — LangGraph wiring with conditional critic→repair edge
+- `app/crew/pipeline.py` — CrewAI sequential crews + appended critic phase
 - `app/crew/llm.py` — Claude CLI bridge into CrewAI
-- `app/agents/{planner,researcher,writer}.py` — the three nodes (shared between engines)
+- `app/agents/{planner,researcher,writer,critic}.py` — the four nodes
+- `app/agents/critic.py` — claim extraction, verdict parsing, repair loop
 - `app/tools/router.py` — keyword-based source selection
 - `app/tools/sources.py` — five free-API clients
 - `app/observability.py` — Langfuse spans (no-op fallback)
 - `app/routes/research.py` — sync + SSE endpoints (both engines)
 - `app/static/index.html` — the live demo UI
+- `eval/run.py` — eval harness CLI
+- `eval/metrics.py` — six per-topic metrics (free + LLM-judge via Critic)
+- `eval/topics.yaml` — curated 10-topic set across routing categories
