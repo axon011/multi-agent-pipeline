@@ -35,8 +35,34 @@ RESEARCH_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+# How many merged search results each question's LLM synthesis sees. The
+# prompt numbers them [1]..[N], so this also bounds the local citation range.
+MAX_CONTEXT_RESULTS = 8
+
+_CITATION_RE = re.compile(r"(\s*)\[(\d+)\]")
+
+
 def _strip_numbering(line: str) -> str:
     return re.sub(r"^\s*[\d]+[\.\)]\s*", "", line).strip()
+
+
+def _renumber_citations(text: str, mapping: dict[int, int]) -> str:
+    """Rewrite per-question [N] markers to indices in the merged source list.
+
+    Each question's synthesis cites its own results from [1], but the Writer
+    and Critic resolve [N] against state["sources"], which merges and dedupes
+    every question's results. Markers with no mapping (the LLM cited a number
+    it was never shown) are dropped rather than left pointing at an unrelated
+    source.
+    """
+
+    def _sub(match: re.Match) -> str:
+        global_idx = mapping.get(int(match.group(2)))
+        if global_idx is None:
+            return ""
+        return f"{match.group(1)}[{global_idx}]"
+
+    return _CITATION_RE.sub(_sub, text)
 
 
 def _flatten_results(grouped: dict[str, list[SearchResult]]) -> list[SearchResult]:
@@ -68,7 +94,7 @@ async def _research_one_question(
         from app.tools.search import web_search_async
         flat = await web_search_async(cleaned, max_results=4)
 
-    search_context = format_results_for_prompt(flat[:8])
+    search_context = format_results_for_prompt(flat[:MAX_CONTEXT_RESULTS])
 
     chain = RESEARCH_PROMPT | llm
     payload = {
@@ -85,7 +111,7 @@ async def _research_one_question(
             "researcher.synthesize",
             model="claude-sonnet-4-5",
             input={"question": cleaned, "sources_used": chosen_sources},
-            metadata={"num_results": len(flat[:8]), "routing": chosen_sources},
+            metadata={"num_results": len(flat[:MAX_CONTEXT_RESULTS]), "routing": chosen_sources},
         ):
             response = await asyncio.to_thread(chain.invoke, payload)
             update_current(output=response.content)
@@ -128,7 +154,8 @@ async def _run_researcher_async(state: PipelineState) -> PipelineState:
 
     notes: list[str] = []
     all_sources: list[dict] = []
-    seen_urls: set[str] = set()
+    # URL -> 1-based position in all_sources, i.e. the [N] the Critic resolves.
+    global_index: dict[str, int] = {}
     routing_log: list[dict] = []
 
     for q, item in zip(questions, results):
@@ -136,16 +163,21 @@ async def _run_researcher_async(state: PipelineState) -> PipelineState:
             logger.warning("research subtask failed: %s", item)
             continue
         note, sources, source_names = item
-        notes.append(note)
         routing_log.append({
             "question": _strip_numbering(q),
             "sources": source_names,
             "found": len(sources),
         })
         for s in sources:
-            if s.url and s.url not in seen_urls:
-                seen_urls.add(s.url)
+            if s.url and s.url not in global_index:
                 all_sources.append(s.to_dict())
+                global_index[s.url] = len(all_sources)
+        local_to_global = {
+            local: global_index[s.url]
+            for local, s in enumerate(sources[:MAX_CONTEXT_RESULTS], 1)
+            if s.url in global_index
+        }
+        notes.append(_renumber_citations(note, local_to_global))
 
     state["research_notes"] = notes
     state["sources"] = all_sources
