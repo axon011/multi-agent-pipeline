@@ -39,7 +39,7 @@ Outputs land in `eval_output/<timestamp>/`:
 | `citation_grounding` | LLM | Critic verdict: % of claims whose cited snippet actually supports them. Needs `--enable-critic` (default). |
 | `source_diversity` | free | Distinct URL domains / total sources. Higher = drawing from more places, not just one site. |
 | `routing_precision` | free | Fraction of a topic's `expected_sources` actually picked by the router. Exercises `app/tools/router.py`. |
-| `word_count` | free | Report length. The portfolio claim is 2,000+ words on detailed depth. |
+| `word_count` | free | Report length. Compare `--depth brief` vs `detailed` runs. |
 | `elapsed_seconds` | free | Wall-clock per topic. Useful when comparing engines or LLM backends. |
 
 `repaired` indicates the Critic triggered a one-shot Writer repair pass.

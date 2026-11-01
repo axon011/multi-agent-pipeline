@@ -1,25 +1,21 @@
 # Multi-Agent Research & Report Pipeline
 
 > **Stack:** LangGraph · CrewAI · FastAPI · Pydantic · Langfuse · Docker · GitHub Actions
-> **Live demo:** _add your Fly URL here after `fly deploy`_
 
 4-agent orchestration pipeline (**Planner → Researcher → Writer →
 Critic**) wired across **two interchangeable engines** — a LangGraph
 typed-state machine with a conditional repair edge and a CrewAI
-sequential crew — selectable per request. Strict role boundaries are
-enforced via Pydantic structured outputs. The Critic audits every
-citation against its source snippet and triggers a one-shot Writer
-repair pass when grounding is too low, making the pipeline
-**self-correcting**. Produces **2,000+ word research reports with
-verifiable source citations** drawn from arXiv, Wikipedia, GitHub,
-Hacker News, and DuckDuckGo via a per-question router. Deployed as an
-async FastAPI service with Docker containerization, GitHub Actions
-CI/CD, and Langfuse observability on every agent and LLM call. Ships
-with a YAML-driven eval harness that scores runs on citation validity,
-grounding, source diversity, and routing precision.
-
-![demo](docs/demo.gif)
-*(Drop a 30-second screen recording at `docs/demo.gif` after first deploy.)*
+sequential crew — selectable per request. The Planner and Critic return
+**schema-validated Pydantic objects** (native function calling on
+OpenAI-compatible models, validated JSON with a retry on the Claude
+CLI). The Critic audits every citation against its source snippet and
+triggers a one-shot Writer repair pass when grounding is too low, making
+the pipeline **self-correcting**. Reports cite sources drawn from arXiv,
+Wikipedia, GitHub, Hacker News, and DuckDuckGo via a per-question
+router. Served as an async FastAPI app with SSE streaming, a Dockerfile,
+GitHub Actions CI, and Langfuse tracing on every agent and LLM call.
+Ships with a YAML-driven eval harness that scores runs on citation
+validity, grounding, source diversity, and routing precision.
 
 ---
 
@@ -51,13 +47,17 @@ grounding, source diversity, and routing precision.
   Critic), `source_diversity`, `routing_precision`, `word_count`,
   `elapsed_seconds`. Outputs a per-topic JSON dump and an aggregate
   markdown table. See `eval/README.md`.
-- **Strict role boundaries.** Each agent's output is parsed into a Pydantic
-  schema (`PipelineState`, `ResearchReport`, `Source`) before the next
-  agent runs. The Researcher cannot fabricate sources because the schema
-  enforces a structured `list[Source]` with `title` / `url` / `snippet`
-  fields; the Writer cannot leak between citations because the report is
-  validated as `ResearchReport` with `key_findings`, `summary`,
-  `full_report`, `word_count`, and a `sources` list.
+- **Schema-validated agent contracts.** The Planner returns a
+  `ResearchPlan` and the Critic returns a `CritiqueOutput` — Pydantic
+  models, not free text parsed with regexes. `app/structured.py` picks
+  the strategy per backend: `with_structured_output(method=
+  "function_calling")` for OpenAI-compatible models, and for the Claude
+  CLI (which runs tools internally and can't surface tool calls) the
+  JSON Schema goes in the prompt, the reply is validated, and one retry
+  is made with the validation error fed back. Sources are never
+  LLM-generated: they come straight from the search APIs as
+  `list[Source]`, and the final response is validated as
+  `ResearchReport`. The Writer and repair pass still emit markdown.
 - **Per-question source routing.** A rule-based router inspects each
   planner-generated sub-question (alongside the original topic) and picks
   2–4 sources from arXiv / Wikipedia / GitHub / HN / DDG. "Best vector DB
@@ -65,14 +65,19 @@ grounding, source diversity, and routing precision.
   frameworks 2026" hits Hacker News. The routing decision for each
   sub-question is streamed back to the UI so you can see *why* a source
   was chosen.
-- **Verifiable citations.** Every claim in the final report carries `[1]
-  [2] [3]` markers that map to the `sources` array — citations are not
-  free-text, they are array indices into a structured-output Pydantic
-  list, which makes them tamper-evident.
-- **Hybrid LLM stack with cost control.** Planner runs on Claude (Sonnet
-  default, togglable to **Opus** via the `use_opus_planner` UI flag);
-  Researcher and Writer run on a cheaper OpenAI-compatible model
-  (GLM-5-turbo by default via Z.ai). Set `LLM_BACKEND=claude` to route
+- **Checkable citations.** Each Researcher answer cites its own search
+  results, and those local `[N]` markers are rewritten to indices into
+  the merged, deduplicated `sources` array before the Writer sees them.
+  Every `[N]` in the final report can therefore be resolved to a source
+  URL and snippet — which is exactly what the Critic and the
+  `citation_validity` eval metric check.
+- **Depth-aware output.** `depth: "brief"` plans 3 questions and asks
+  for 2–3 analysis paragraphs; `"detailed"` plans 5 and asks for 5–7.
+- **Hybrid LLM stack with cost control.** When a logged-in Claude CLI is
+  on PATH, the Planner runs on Claude (Sonnet default, togglable to
+  **Opus** via the `use_opus_planner` UI flag); otherwise it uses the
+  worker model. Researcher, Writer and Critic run on a cheaper
+  OpenAI-compatible model (GLM-5-turbo by default via Z.ai). Set `LLM_BACKEND=claude` to route
   the whole pipeline through the Claude CLI subscription for local
   testing without API spend; the CrewAI engine bridges Claude CLI into
   CrewAI agents via `app/crew/llm.py`.
@@ -86,7 +91,8 @@ grounding, source diversity, and routing precision.
   panel, and previewed source URLs all stream to the browser via
   Server-Sent Events before the Writer composes the final report.
 - **Langfuse observability.** Every agent and LLM call is wrapped in
-  `@observe` / `trace_llm` spans capturing input, output, model, latency,
+  `@observe` / `trace_llm` spans capturing input, output, the model
+  actually used for that backend, latency,
   routing decisions, and source counts. The instrumentation degrades to
   a no-op when `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` aren't set,
   so the pipeline runs unchanged without an account. Module:
@@ -241,13 +247,14 @@ fly deploy
 ```
 
 The included `fly.toml` runs on a 1-CPU 512 MB shared VM and auto-stops
-when idle, so the free tier covers a portfolio demo. Drop the resulting
-URL into the badge at the top of this README.
+when idle.
 
 > **Note:** `LLM_BACKEND=claude` only works locally — the Claude CLI
 > isn't authenticated on a remote host. Use the OpenAI-compatible
-> backend (GLM, OpenAI, OpenRouter, …) for cloud deploys. CrewAI engine
-> works in both modes; LangGraph engine works in both modes.
+> backend (GLM, OpenAI, OpenRouter, …) for cloud deploys. The LangGraph
+> engine works with either backend. The CrewAI engine's Planner and
+> Writer currently always run through the Claude CLI
+> (`app/crew/llm.py`), so use `engine: "langgraph"` on cloud deploys.
 
 ## Tech
 
@@ -263,7 +270,8 @@ API.
 - `app/crew/pipeline.py` — CrewAI sequential crews + appended critic phase
 - `app/crew/llm.py` — Claude CLI bridge into CrewAI
 - `app/agents/{planner,researcher,writer,critic}.py` — the four nodes
-- `app/agents/critic.py` — claim extraction, verdict parsing, repair loop
+- `app/agents/critic.py` — claim extraction, structured verdicts, repair loop
+- `app/structured.py` — schema-validated output across both LLM backends
 - `app/tools/router.py` — keyword-based source selection
 - `app/tools/sources.py` — five free-API clients
 - `app/observability.py` — Langfuse spans (no-op fallback)

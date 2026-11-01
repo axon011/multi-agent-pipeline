@@ -20,8 +20,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Tests use fake LLMs and need no API keys.
       - name: Run tests
         run: pytest tests/ -v
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4o

@@ -23,7 +23,7 @@ def test_report_schema():
         summary="short summary",
         key_findings=["finding 1", "finding 2"],
         full_report="full report text here",
-        sources_consulted=[],
+        sources=[],
         word_count=5,
     )
     assert report.word_count == 5
