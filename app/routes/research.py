@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app.config import planner_model_label
 from app.graph.pipeline import COMPILED_GRAPH, run_pipeline, state_to_report
 from app.models.schemas import PipelineState, ResearchRequest, ResearchReport
 
@@ -83,7 +84,11 @@ async def research_stream(request: ResearchRequest):
             {
                 "topic": request.topic,
                 "depth": request.depth,
-                "planner_model": "opus" if request.use_opus_planner else "sonnet",
+                "planner_model": (
+                    f"claude-cli:{'opus' if request.use_opus_planner else 'sonnet'}"
+                    if request.engine == "crew"
+                    else planner_model_label(request.use_opus_planner)
+                ),
                 "engine": request.engine,
                 "enable_critic": request.enable_critic,
             },
@@ -110,13 +115,15 @@ async def research_stream(request: ResearchRequest):
                     "stage",
                     {"node": "planner", "label": STAGE_LABELS["planner"]},
                 )
+                from app.agents.planner import plan_size
+
                 planner_crew = _build_planner_crew(request.use_opus_planner)
                 plan_result = await _aio.to_thread(
                     planner_crew.kickoff,
-                    {"topic": request.topic, "depth": request.depth},
+                    {"topic": request.topic, "num_questions": plan_size(request.depth)},
                 )
                 plan = _parse_plan_output(
-                    getattr(plan_result, "raw", str(plan_result))
+                    getattr(plan_result, "raw", str(plan_result)), request.depth
                 )
                 merged_state["plan"] = plan
                 yield _sse("plan", {"questions": plan, "count": len(plan)})

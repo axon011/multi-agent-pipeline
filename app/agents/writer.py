@@ -18,7 +18,7 @@ WRITE_PROMPT = ChatPromptTemplate.from_messages([
         "- finding 4\n"
         "- finding 5\n\n"
         "## Detailed Analysis\n"
-        "(2-3 paragraphs synthesizing the research)\n\n"
+        "({analysis_length} synthesizing the research)\n\n"
         "## Conclusion\n"
         "(1 paragraph)\n\n"
         "Preserve any inline citations like [1], [2] from the research notes — "
@@ -33,18 +33,32 @@ WRITE_PROMPT = ChatPromptTemplate.from_messages([
 ])
 
 
+# Depth controls how much analysis the Writer produces. Planner question
+# count scales with depth too (app/models/schemas.py:QUESTIONS_PER_DEPTH).
+ANALYSIS_LENGTH = {
+    "brief": "2-3 paragraphs",
+    "detailed": "5-7 paragraphs, one or more per research question",
+}
+
+
 @observe(name="writer", as_type="agent", capture_input=False, capture_output=False)
 def run_writer(state: PipelineState) -> PipelineState:
-    from app.config import get_llm
+    from app.config import get_llm, worker_model_label
 
     llm = get_llm(temperature=0.5)
     notes_text = "\n\n".join(state.get("research_notes", []))
     chain = WRITE_PROMPT | llm
-    payload = {"topic": state["topic"], "notes": notes_text}
+    payload = {
+        "topic": state["topic"],
+        "notes": notes_text,
+        "analysis_length": ANALYSIS_LENGTH.get(
+            state.get("depth", "detailed"), ANALYSIS_LENGTH["detailed"]
+        ),
+    }
 
     with trace_llm(
         "writer.compose",
-        model="claude-sonnet-4-5",
+        model=worker_model_label(),
         input={"topic": state["topic"], "note_count": len(state.get("research_notes", []))},
     ):
         response = chain.invoke(payload)

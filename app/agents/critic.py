@@ -15,8 +15,17 @@ import re
 
 from langchain_core.prompts import ChatPromptTemplate
 
-from app.models.schemas import CritiqueReport, CritiqueVerdict, PipelineState
+from pydantic import ValidationError
+
+from app.models.schemas import (
+    ClaimVerdict,
+    CritiqueOutput,
+    CritiqueReport,
+    CritiqueVerdict,
+    PipelineState,
+)
 from app.observability import observe, trace_llm, update_current
+from app.structured import StructuredOutputError, extract_json, invoke_structured
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +50,12 @@ CRITIC_PROMPT = ChatPromptTemplate.from_messages([
         "- supported: the snippet(s) clearly back the claim\n"
         "- partial: snippet is related but doesn't fully back the claim\n"
         "- unsupported: snippet does not back the claim or contradicts it\n\n"
-        "Respond with ONLY a JSON array of objects, one per claim, each with "
-        "keys 'index' (int, the claim index from input), 'verdict' (string), "
-        "'reason' (one short sentence). No prose outside the JSON."
+        "Return one verdict per claim, keyed by the claim's index, with a "
+        "one-sentence reason."
     ),
     (
         "user",
-        "Claims to audit:\n{claims_block}\n\n"
-        "Return the JSON array now."
+        "Claims to audit:\n{claims_block}"
     ),
 ])
 
@@ -100,46 +107,57 @@ def _build_claims_block(
     return "\n".join(lines)
 
 
-def _parse_verdicts(
-    raw: str,
+def _align_verdicts(
+    items: list[ClaimVerdict],
     claims: list[tuple[str, list[int]]],
 ) -> list[CritiqueVerdict]:
-    """Parse the LLM's JSON array into CritiqueVerdict objects.
+    """Map the Critic's per-index verdicts back onto the extracted claims.
 
-    Falls back to 'partial' for any claim the LLM forgot or mis-indexed —
-    we never want a parse failure to kill the pipeline.
+    Any claim the LLM skipped or mis-indexed falls back to 'partial' — we
+    never want an incomplete audit to kill the pipeline.
     """
-    # Strip code fences if the model wrapped the JSON
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.DOTALL)
-
-    parsed: list[dict] = []
-    try:
-        parsed = json.loads(cleaned)
-        if not isinstance(parsed, list):
-            parsed = []
-    except json.JSONDecodeError:
-        logger.warning("Critic JSON parse failed; falling back to partial verdicts")
-
-    by_index = {p.get("index"): p for p in parsed if isinstance(p, dict)}
-
+    by_index = {item.index: item for item in items}
     verdicts: list[CritiqueVerdict] = []
-    valid = {"supported", "partial", "unsupported", "no_citation"}
     for i, (claim, indices) in enumerate(claims):
-        entry = by_index.get(i, {})
-        v = entry.get("verdict", "partial")
-        if v not in valid:
-            v = "partial"
+        item = by_index.get(i)
         verdicts.append(
             CritiqueVerdict(
                 claim=claim,
                 citation_indices=indices,
-                verdict=v,
-                reason=str(entry.get("reason", ""))[:240],
+                verdict=item.verdict if item else "partial",
+                reason=(item.reason if item else "")[:240],
             )
         )
     return verdicts
+
+
+def _parse_verdicts(
+    raw: str,
+    claims: list[tuple[str, list[int]]],
+) -> list[CritiqueVerdict]:
+    """Lenient parser for a raw-text Critic reply.
+
+    Accepts either a bare JSON array of verdicts or a ``CritiqueOutput``
+    object. Each entry is validated against ``ClaimVerdict`` individually,
+    so one malformed entry only downgrades that claim to 'partial'.
+    """
+    try:
+        data = json.loads(extract_json(raw))
+    except json.JSONDecodeError:
+        logger.warning("Critic JSON parse failed; falling back to partial verdicts")
+        data = []
+    if isinstance(data, dict):
+        data = data.get("verdicts", [])
+    if not isinstance(data, list):
+        data = []
+
+    items: list[ClaimVerdict] = []
+    for entry in data:
+        try:
+            items.append(ClaimVerdict.model_validate(entry))
+        except ValidationError:
+            continue
+    return _align_verdicts(items, claims)
 
 
 def _score(verdicts: list[CritiqueVerdict]) -> float:
@@ -160,21 +178,29 @@ async def _critique_async(
     if not claims:
         return CritiqueReport(score=1.0, verdicts=[], repaired=False, iterations=1)
 
+    from app.config import worker_model_label
+
     claims_block = _build_claims_block(claims, sources)
-    chain = CRITIC_PROMPT | llm
     payload = {"claims_block": claims_block}
 
     with trace_llm(
         "critic.audit",
-        model="claude-sonnet-4-5",
+        model=worker_model_label(),
         input={"claim_count": len(claims), "source_count": len(sources)},
     ):
-        # Mirror researcher's pattern: push to a worker thread so the Claude
-        # CLI backend doesn't fight uvicorn's running event loop on Windows.
-        response = await asyncio.to_thread(chain.invoke, payload)
-        update_current(output=response.content[:2000])
+        # Push to a worker thread so the Claude CLI backend doesn't fight
+        # uvicorn's running event loop on Windows (mirrors the researcher).
+        try:
+            output = await asyncio.to_thread(
+                invoke_structured, llm, CRITIC_PROMPT, payload, CritiqueOutput
+            )
+            items = output.verdicts
+        except StructuredOutputError:
+            logger.warning("Critic output failed schema validation; using partial verdicts")
+            items = []
+        update_current(output=[i.model_dump() for i in items])
 
-    verdicts = _parse_verdicts(response.content, claims)
+    verdicts = _align_verdicts(items, claims)
     return CritiqueReport(
         score=_score(verdicts),
         verdicts=verdicts,
@@ -242,12 +268,14 @@ async def repair_report(
         lines.append("")
     flagged_block = "\n".join(lines)
 
+    from app.config import worker_model_label
+
     chain = REPAIR_PROMPT | llm
     payload = {"report": report, "flagged_block": flagged_block}
 
     with trace_llm(
         "writer.repair",
-        model="claude-sonnet-4-5",
+        model=worker_model_label(),
         input={"flagged_count": len(flagged)},
     ):
         response = await asyncio.to_thread(chain.invoke, payload)

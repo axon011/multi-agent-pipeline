@@ -16,6 +16,7 @@ Why not put the multi-source search inside a CrewAI Tool?
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
@@ -26,11 +27,13 @@ os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from crewai import Agent, Crew, Process, Task
 
+from app.agents.planner import clean_plan, plan_size
 from app.agents.researcher import _run_researcher_async
 from app.crew.llm import ClaudeCodeCrewLLM
 from app.graph.pipeline import state_to_report
-from app.models.schemas import PipelineState, ResearchReport
+from app.models.schemas import PipelineState, ResearchPlan, ResearchReport
 from app.observability import observe, trace_llm, update_current, update_current_trace
+from app.structured import StructuredOutputError, parse_model
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ def _build_planner_crew(use_opus: bool) -> Crew:
     llm = ClaudeCodeCrewLLM(model="opus" if use_opus else "sonnet")
     planner = Agent(
         role="Research Planner",
-        goal="Break a topic into 3-5 specific, answerable research questions",
+        goal="Break a topic into specific, answerable research questions",
         backstory=(
             "You are a thorough research planner. You produce tight, "
             "answerable questions that cover different facets of the topic, "
@@ -51,13 +54,18 @@ def _build_planner_crew(use_opus: bool) -> Crew:
     )
     plan_task = Task(
         description=(
-            "Topic: {topic}\nDepth: {depth}\n\n"
-            "Produce a numbered list of 3-5 specific research questions "
+            "Topic: {topic}\n\n"
+            "Produce exactly {num_questions} specific research questions "
             "that, if answered, would let someone write a focused report "
-            "on the topic. Output ONLY the numbered list, no preamble or "
-            "trailing commentary."
+            "on the topic. Each question must stand alone and must not be "
+            "numbered.\n\n"
+            "Respond with ONLY a JSON object that validates against this "
+            "JSON Schema, no prose and no markdown fences:\n"
+            # CrewAI only interpolates {identifier} placeholders, so the
+            # schema's JSON braces pass through untouched.
+            + json.dumps(ResearchPlan.model_json_schema())
         ),
-        expected_output="A numbered list of 3-5 specific research questions.",
+        expected_output='A JSON object of the form {"questions": ["...", "..."]}.',
         agent=planner,
     )
     return Crew(
@@ -107,12 +115,22 @@ def _build_writer_crew(use_opus: bool) -> Crew:
     )
 
 
-def _parse_plan_output(raw: str) -> list[str]:
-    """CrewAI returns the planner's raw text — split into question lines."""
+def _parse_plan_output(raw: str, depth: str = "detailed") -> list[str]:
+    """Validate the planner crew's reply against ``ResearchPlan``.
+
+    CrewAI's custom-LLM path has no native structured output, so we ask for
+    JSON in the task and validate it here. If the model ignores the format
+    we fall back to treating each non-empty line as a question, so a
+    formatting slip degrades the plan rather than failing the run.
+    """
+    max_questions = plan_size(depth)
+    try:
+        return clean_plan(parse_model(raw or "", ResearchPlan), max_questions)
+    except StructuredOutputError:
+        logger.warning("crew planner output failed ResearchPlan validation; line-splitting")
     lines = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
-    # Drop any markdown header noise like "**Research Plan:** ..." that
-    # CrewAI's verbose role-playing sometimes adds.
-    return [ln for ln in lines if not ln.startswith(("#", "**Research"))]
+    lines = [ln for ln in lines if not ln.startswith(("#", "**Research"))]
+    return lines[:max_questions]
 
 
 @observe(name="run_pipeline.crew", as_type="chain", capture_input=False, capture_output=False)
@@ -139,17 +157,17 @@ async def run_crew_pipeline(
     # ChatClaudeCode shells out a subprocess and uvicorn's running loop
     # can't host another loop.
     planner_crew = _build_planner_crew(use_opus_planner)
-    model_label = "claude-opus-4-6" if use_opus_planner else "claude-sonnet-4-5"
+    # The crew engine always runs on the Claude CLI (see app/crew/llm.py).
+    model_label = f"claude-cli:{'opus' if use_opus_planner else 'sonnet'}"
+    planner_inputs = {"topic": topic, "num_questions": plan_size(depth)}
     with trace_llm(
         "crew.planner.kickoff",
         model=model_label,
-        input={"topic": topic, "depth": depth},
+        input=planner_inputs,
     ):
-        plan_result = await asyncio.to_thread(
-            planner_crew.kickoff, {"topic": topic, "depth": depth}
-        )
+        plan_result = await asyncio.to_thread(planner_crew.kickoff, planner_inputs)
         update_current(output=getattr(plan_result, "raw", str(plan_result)))
-    plan = _parse_plan_output(getattr(plan_result, "raw", str(plan_result)))
+    plan = _parse_plan_output(getattr(plan_result, "raw", str(plan_result)), depth)
     logger.info("crew planner produced %d questions", len(plan))
 
     # Phase 2 — Multi-source research (shared with LangGraph engine).
@@ -178,7 +196,7 @@ async def run_crew_pipeline(
         writer_crew = _build_writer_crew(use_opus_planner)
         with trace_llm(
             "crew.writer.kickoff",
-            model="claude-sonnet-4-5",
+            model="claude-cli:sonnet",
             input={"topic": topic, "note_count": len(state.get("research_notes", []))},
         ):
             write_result = await asyncio.to_thread(

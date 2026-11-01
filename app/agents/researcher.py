@@ -83,6 +83,8 @@ async def _research_one_question(
     topic: str | None = None,
 ) -> tuple[str, list[SearchResult], list[str]]:
     """Route → multi-source search → LLM synthesis. Returns (note, sources, source_names)."""
+    from app.config import worker_model_label
+
     cleaned = _strip_numbering(question)
     chosen_sources = route_sources(cleaned, topic=topic)
 
@@ -109,7 +111,7 @@ async def _research_one_question(
     try:
         with trace_llm(
             "researcher.synthesize",
-            model="claude-sonnet-4-5",
+            model=worker_model_label(),
             input={"question": cleaned, "sources_used": chosen_sources},
             metadata={"num_results": len(flat[:MAX_CONTEXT_RESULTS]), "routing": chosen_sources},
         ):

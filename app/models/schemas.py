@@ -10,12 +10,45 @@ class PipelineState(TypedDict, total=False):
     sources: list[dict]  # list of {"title", "url", "snippet"}
     routing: list[dict]  # per-question routing decisions
     report: str
-    use_opus_planner: bool  # if True, planner runs on Opus 4.6 instead of Sonnet
+    use_opus_planner: bool  # if True, planner runs on Claude Opus instead of Sonnet
     # Critic state — None until critic runs. critique_iterations tracks
     # how many writer-repair passes have run so we cap the loop.
     critique: dict
     critique_iterations: int
     enable_critic: bool
+
+
+# ---------------------------------------------------------------------------
+# LLM-facing structured outputs. These are the contracts between agents:
+# the planner and critic must return JSON that validates against them
+# (see app/structured.py), rather than free text parsed with regexes.
+# ---------------------------------------------------------------------------
+
+# Number of planner questions per depth. `detailed` also asks the writer for
+# a longer report (see app/agents/writer.py).
+QUESTIONS_PER_DEPTH = {"brief": 3, "detailed": 5}
+
+
+class ResearchPlan(BaseModel):
+    """Planner output: the sub-questions the Researcher will answer."""
+    questions: list[str] = Field(
+        min_length=1,
+        max_length=8,
+        description="Specific, answerable research questions, one per entry, "
+                    "without numbering.",
+    )
+
+
+class ClaimVerdict(BaseModel):
+    """Critic output for a single claim."""
+    index: int = Field(ge=0, description="The claim index from the input.")
+    verdict: Literal["supported", "partial", "unsupported"]
+    reason: str = Field(default="", description="One short sentence.")
+
+
+class CritiqueOutput(BaseModel):
+    """Critic output: one verdict per audited claim."""
+    verdicts: list[ClaimVerdict]
 
 
 class Source(BaseModel):
@@ -53,7 +86,10 @@ class ResearchRequest(BaseModel):
     depth: Literal["brief", "detailed"] = "detailed"
     use_opus_planner: bool = Field(
         default=False,
-        description="Run the planner on Claude Opus 4.6 instead of Sonnet.",
+        description=(
+            "Run the planner on Claude Opus instead of Sonnet (Claude CLI "
+            "backend only; ignored on OpenAI-compatible backends)."
+        ),
     )
     engine: Literal["langgraph", "crew"] = Field(
         default="langgraph",

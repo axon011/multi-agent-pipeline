@@ -54,3 +54,15 @@ def get_planner_llm(use_opus: bool = False):
     if LLM_BACKEND == "claude" or CLAUDE_CLI_AVAILABLE:
         return get_claude_llm(model="opus" if use_opus else "sonnet")
     return _get_openai_llm(temperature=0.3)
+
+
+def worker_model_label() -> str:
+    """Name of the model behind get_llm(), for traces and SSE events."""
+    return "claude-cli:sonnet" if LLM_BACKEND == "claude" else LLM_MODEL
+
+
+def planner_model_label(use_opus: bool = False) -> str:
+    """Name of the model behind get_planner_llm(), for traces and SSE events."""
+    if LLM_BACKEND == "claude" or CLAUDE_CLI_AVAILABLE:
+        return f"claude-cli:{'opus' if use_opus else 'sonnet'}"
+    return LLM_MODEL
