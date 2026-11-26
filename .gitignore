@@ -10,3 +10,9 @@ build/
 venv/
 bench_output/
 eval_output/
+
+# local agent notes and build plans
+CLAUDE.md
+AGENT.md
+.agent.md
+agents.md
